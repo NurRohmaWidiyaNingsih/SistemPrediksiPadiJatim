@@ -128,7 +128,7 @@ def section_header(title, level=2):
     else:
         st.markdown(f"""
         <div style="border-bottom: 2px solid #2e7d32; padding: 6px 0; margin: 14px 0 8px 0;
-                    color: #000000; font-size: 1rem; font-weight: 600;">
+                    color: #000000; font-size: 2rem; font-weight: 600;">
             {title}
         </div>
         """, unsafe_allow_html=True)
@@ -242,7 +242,7 @@ def home_page():
     st.divider()
     
     # Section: Benefits
-    st.markdown("### 💡 Manfaat Sistem")
+    section_header("💡 Manfaat Sistem", level=3)
     
     col1, col2, col3 = st.columns(3)
     
@@ -291,7 +291,7 @@ def home_page():
     st.divider()
     
     # Section: Quick Start
-    st.markdown("### 🚀 Mulai Menggunakan dalam 4 Langkah")
+    section_header("🚀 Mulai Menggunakan dalam 4 Langkah", level=3)
     
     steps = [
         ("  Data Masukan", " Input manual data iklim & lahan produksi padi"),
@@ -324,7 +324,7 @@ def home_page():
     st.divider()
     
     # Section: Key Features
-    st.markdown("### ✨ Fitur Unggulan")
+    section_header("✨ Fitur Unggulan", level=3)
     
     features = [
         ("Visualisasi Dashor", "Grafik interaktif, dashboard analytics, dan analisis mendalam untuk setiap kabupaten/kota"),
@@ -2574,14 +2574,13 @@ def proses_model_svr_pso_page():
     st.info("✅ Hasil prediksi telah di-**DENORMALISASI** ke satuan TON asli menggunakan scaler_y")
     
     # Training Configuration Info
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
         st.metric("🎯 Kernel", results.get('kernel', 'RBF'))
     with col2:
         st.metric("⚙️ Particles", results.get('particles', 'N/A'))
     with col3:
         st.metric("🔹 Iterasi", results.get('iterasi', 'N/A'))
-    col4, col5 = st.columns(2)
     with col4:
         st.metric("📊 Train Size", len(X_train))
     with col5:
