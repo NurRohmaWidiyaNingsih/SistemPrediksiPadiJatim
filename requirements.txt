@@ -1,9 +1,0 @@
-streamlit
-pandas
-numpy
-scikit-learn
-joblib
-openpyxl
-statsmodels
-matplotlib
-huggingface_hub
