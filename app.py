@@ -1718,6 +1718,8 @@ def proses_model_svr_pso_page():
         st.session_state.scenario_data = None
     if 'scenario_choice' not in st.session_state:
         st.session_state.scenario_choice = None
+    if 'selected_features' not in st.session_state:
+        st.session_state.selected_features = None
     if 'split_data' not in st.session_state:
         st.session_state.split_data = None
     if 'missing_value_checked' not in st.session_state:
@@ -1994,7 +1996,8 @@ def proses_model_svr_pso_page():
         options=[
             "1. Model Gabungan DENGAN Penanda Daerah (Global - One Hot Encoding)",
             "2. Model Gabungan TANPA Penanda Daerah (Global Blind Model)",
-            "3. Model Khusus Per Daerah (Local Model)"
+            "3. Model Khusus Per Daerah (Local Model)",
+            "4. Custom Feature Selection"
         ],
         key="scenario_selection",
         help="Pilih satu opsi untuk menentukan cara pemrosesan data"
@@ -2022,6 +2025,21 @@ def proses_model_svr_pso_page():
             st.info(f"📍 Anda memilih: **{selected_kabupaten}** ({len(df[df[kab_col] == selected_kabupaten])} data points)")
         else:
             st.warning("⚠️ Kolom 'Kabupaten' tidak ditemukan dalam data")
+    
+    # Inisialisasi multiselect untuk skenario 4
+    selected_features = None
+    if "4. Custom Feature Selection" in scenario_choice:
+        feature_options = [c for c in df.columns if c not in ['Produksi', 'Periode', 'produksi', 'periode']]
+        selected_features = st.multiselect(
+            "Pilih fitur yang akan digunakan dalam pemodelan:",
+            options=feature_options,
+            default=[],
+            key="feature_selection_multiselect"
+        )
+        if selected_features:
+            st.info(f"✅ {len(selected_features)} dari {len(feature_options)} fitur dipilih")
+        else:
+            st.warning("⚠️ Belum ada fitur yang dipilih")
     
     if st.button("✅ Terapkan Skenario & Lanjut", use_container_width=True, key="apply_scenario_btn"):
         try:
@@ -2057,6 +2075,20 @@ def proses_model_svr_pso_page():
                     st.error("❌ Kabupaten tidak dipilih dengan benar")
                     st.stop()
                 st.info("✅ Kolom 'Bulan' dan 'Tahun' dipertahankan untuk Step 6 (Sin-Cos Encoding)")
+            elif "4. Custom Feature Selection" in scenario_choice:
+                if selected_features:
+                    cols_to_drop = [c for c in df_scenario.columns 
+                                    if c not in selected_features and c not in ['Produksi', 'produksi']]
+                    if cols_to_drop:
+                        df_scenario.drop(columns=cols_to_drop, inplace=True)
+                        st.success(f"✅ Skenario 4: {len(cols_to_drop)} fitur dihapus ({', '.join(cols_to_drop)})")
+                    else:
+                        st.success("✅ Skenario 4: Semua fitur dipertahankan")
+                    kept_features = [c for c in df_scenario.columns if c not in ['Produksi', 'produksi']]
+                    st.info(f"📊 Fitur yang digunakan: {kept_features}")
+                else:
+                    st.error("❌ Tidak ada fitur yang dipilih. Pilih minimal 1 fitur.")
+                    st.stop()
             
             # Simpan ke session state
             st.session_state.scenario_data = df_scenario
