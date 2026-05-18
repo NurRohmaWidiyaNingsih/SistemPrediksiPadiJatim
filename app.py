@@ -12,6 +12,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_percentage_error, mean_squared_error, r2_score, mean_absolute_error
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 import os
+import io
 import joblib
 import warnings
 warnings.filterwarnings('ignore')
@@ -132,6 +133,29 @@ def section_header(title, level=2):
             {title}
         </div>
         """, unsafe_allow_html=True)
+
+def page_info_box(content: str):
+    """Kotak informasi ringkas di awal halaman menu (Markdown native)"""
+    with st.container(border=True):
+        st.markdown(content)
+
+def build_model_bundle(results: dict) -> dict:
+    """Susun bundle model untuk serialisasi joblib"""
+    return {
+        "model": results.get("model"),
+        "scaler_X": results.get("scaler_X"),
+        "scaler_y": results.get("scaler_y"),
+        "feature_columns": results.get("feature_columns"),
+        "best_params": results.get("best_params"),
+        "kernel": results.get("kernel"),
+        "scenario": results.get("scenario"),
+        "metrics": {
+            "mape": results.get("best_mape"),
+            "mae": results.get("mae"),
+            "rmse": results.get("rmse"),
+            "r2": results.get("r2"),
+        },
+    }
 
 def id_format(value, decimals=0):
     """Format angka ke format Indonesia: titik=ribuan, koma=desimal"""
@@ -352,7 +376,28 @@ def home_page():
 
 def input_data_page():
     """Halaman input data manual dan prediksi dengan model SVR"""
-    custom_header("📝 Input Data & Prediksi", "Input data iklim dan lahan untuk prediksi produksi padi")
+    custom_header("🎯 Prediksi Cepat", "Prediksi produksi padi menggunakan model SVR yang sudah dilatih")
+    
+    page_info_box("""
+**Tentang Menu Ini**
+
+Menu ini memprediksi **produksi padi (ton)** dan **produktivitas (ku/ha)** tanpa melatih ulang model —
+langsung memakai model tersimpan `model_final_padi.save` (SVR-ANOVA-RBF).
+
+**Fitur:**
+- **Prediksi Cepat** — input satu baris, hasil instan.
+- **Batch Input** — kumpulkan banyak baris, prediksi sekaligus + ringkasan statistik.
+
+**Alur data:**
+1. Anda mengisi variabel iklim & lahan per kabupaten/bulan.
+2. Data dinormalisasi MinMax [0,1], kabupaten di-*one-hot* (38 wilayah), bulan di-*sin-cos* encoding → 47 fitur.
+3. Model SVR menghasilkan produksi (skala [0,1]) lalu dikonversi ke ton.
+
+**Parameter input** (bukan hyperparameter training):
+Kabupaten/Kota, Tahun, Bulan, Luas Panen (ha), Curah Hujan (mm), Kelembapan (%),
+Suhu (°C), Kecepatan Angin (m/s), Sinar Matahari (jam/hari).
+Parameter C, γ, ε *tidak* diatur di sini — sudah tertanam dalam model terlatih.
+""")
     
     tab1, tab2 = st.tabs(["🎯 Prediksi Cepat", "📋 Batch Input"])
     
@@ -365,11 +410,6 @@ def input_data_page():
         if model is None:
             st.error("❌ Model tidak ditemukan: model_final_padi.save")
             st.stop()
-        
-        st.markdown("""
-        Masukkan data iklim dan lahan untuk mendapatkan prediksi produksi padi menggunakan 
-        model SVR-ANOVA-RBF yang telah dilatih dengan data 34 Kabupaten/Kota di Jawa Timur.
-        """)
         
         with st.form("prediction_form", border=True):
             # Row 1: Data Dasar
@@ -1688,7 +1728,31 @@ dan mengurangi risiko produksi di tingkat petani dan wilayah.
 
 def proses_model_svr_pso_page():
     """Halaman untuk proses model SVR-PSO dengan preprocessing pipeline"""
-    custom_header("🤖 Proses Model SVR-PSO", "Pipeline Data Processing & Machine Learning Training")
+    custom_header("⚙️ Proses Model SVR-PSO", "Pipeline Data Processing & Machine Learning Training")
+    
+    page_info_box("""
+**Tentang Menu Ini**
+
+Menu ini **melatih model SVR baru** dari data historis Anda.
+Particle Swarm Optimization (PSO) mencari kombinasi hyperparameter SVR terbaik (C, γ, ε)
+sebelum model dipakai untuk prediksi dan dievaluasi.
+
+**Fitur (10 langkah):**
+- Upload CSV/Excel atau input manual baris demi baris.
+- Preprocessing: ekstrak Bulan/Tahun, imputasi missing value, pilih skenario pemodelan.
+- Split kronologis 90% training / 10% testing (tanpa shuffle).
+- Encoding: one-hot kabupaten, sin-cos bulan, MinMaxScaler terpisah untuk X dan y.
+- Training PSO + SVR, metrik MAPE, grafik konvergensi, unduh CSV & model joblib.
+
+**Alur data:**
+1. Data masuk (wajib kolom iklim, lahan, wilayah, periode, dan **Produksi** sebagai target).
+2. Diproses sesuai skenario (global dengan/tanpa wilayah, per daerah, atau fitur kustom).
+3. Dilatih dengan PSO; hasil prediksi dinormalisasi kembali ke satuan ton untuk evaluasi.
+
+**Parameter yang dapat diatur:**
+**Kernel:** RBF atau ANOVA RBF | **PSO:** jumlah partikel, iterasi (w=0.7, c1=c2=1.5 tetap) |
+**SVR (range pencarian):** C, ε (epsilon), γ (gamma).
+""")
     
     # Custom MAPE function 
     def calculate_mape(y_true, y_pred):
@@ -2562,7 +2626,10 @@ def proses_model_svr_pso_page():
                 'iterasi': n_iter,
                 'kernel': kernel_choice,
                 'y_pred_scaled': y_pred_scaled,  # Store scaled for reference
-                'scaler_y': st.session_state.scaler_y
+                'scaler_y': st.session_state.scaler_y,
+                'scaler_X': st.session_state.scaler_X,
+                'feature_columns': list(X_train.columns),
+                'scenario': st.session_state.scenario_choice,
             }
             
             progress_placeholder.progress(1.0)
@@ -2727,17 +2794,48 @@ def proses_model_svr_pso_page():
     preview_df = pd.DataFrame(preview_data)
     st.dataframe(preview_df, use_container_width=True)
     
-    # Download CSV
+    # Download CSV & Model
     section_header("💾 Download Hasil", level=3)
     
-    csv = preview_df.to_csv(index=False)
-    st.download_button(
-        label="📥 Download Hasil Prediksi (CSV)",
-        data=csv,
-        file_name="hasil_prediksi_svr_pso.csv",
-        mime="text/csv",
-        use_container_width=True
+    st.caption(
+        "Model joblib memakai pipeline training halaman ini (scaler + fitur hasil encoding). "
+        "Berbeda dari `model_final_padi.save` di menu Prediksi Cepat."
     )
+    
+    col_csv, col_model = st.columns(2)
+    with col_csv:
+        csv = preview_df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Hasil Prediksi (CSV)",
+            data=csv,
+            file_name="hasil_prediksi_svr_pso.csv",
+            mime="text/csv",
+            use_container_width=True,
+            key="download_csv_results",
+        )
+    with col_model:
+        model_ok = results.get("model") is not None
+        if model_ok:
+            kernel_slug = str(results.get("kernel", "model")).replace(" ", "_").lower()
+            bundle = build_model_bundle(results)
+            model_buffer = io.BytesIO()
+            joblib.dump(bundle, model_buffer)
+            model_buffer.seek(0)
+            st.download_button(
+                label="📦 Download Model (joblib)",
+                data=model_buffer,
+                file_name=f"model_svr_pso_{kernel_slug}.joblib",
+                mime="application/octet-stream",
+                use_container_width=True,
+                key="download_joblib_model",
+            )
+        else:
+            st.button(
+                "📦 Download Model (joblib)",
+                disabled=True,
+                use_container_width=True,
+                help="Model tidak tersedia — training gagal atau belum selesai.",
+            )
 
 
 # ==================== MAIN APP ====================
