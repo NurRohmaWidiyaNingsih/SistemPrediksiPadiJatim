@@ -1,6 +1,6 @@
 """
 SI-PADI JATIM - Sistem Prediksi Produksi Padi Berbasis Machine Learning
-Menggunakan SVR dengan PSO Optimization dan Kernel ANOVA RBF
+Menggunakan SVR dengan PSO Optimization dan Kernel ANOVA RBf
 """
 
 import streamlit as st
@@ -8,12 +8,13 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import sklearn
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_absolute_percentage_error, mean_squared_error, r2_score, mean_absolute_error
+from sklearn.model_selection import train_test_split, KFold
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 import os
 import io
 import joblib
+import time
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -141,7 +142,7 @@ def page_info_box(content: str):
 
 def build_model_bundle(results: dict) -> dict:
     """Susun bundle model untuk serialisasi joblib"""
-    return {
+    bundle = {
         "model": results.get("model"),
         "scaler_X": results.get("scaler_X"),
         "scaler_y": results.get("scaler_y"),
@@ -150,12 +151,14 @@ def build_model_bundle(results: dict) -> dict:
         "kernel": results.get("kernel"),
         "scenario": results.get("scenario"),
         "metrics": {
-            "mape": results.get("best_mape"),
-            "mae": results.get("mae"),
             "rmse": results.get("rmse"),
             "r2": results.get("r2"),
         },
     }
+    if results.get("is_cv"):
+        bundle["metrics"]["cv_avg_rmse_5fold"] = results.get("cv_avg_rmse_5fold")
+        bundle["metrics"]["cv_avg_rmse_10fold"] = results.get("cv_avg_rmse_10fold")
+    return bundle
 
 def id_format(value, decimals=0):
     """Format angka ke format Indonesia: titik=ribuan, koma=desimal"""
@@ -1740,9 +1743,9 @@ sebelum model dipakai untuk prediksi dan dievaluasi.
 **Fitur (10 langkah):**
 - Upload CSV/Excel atau input manual baris demi baris.
 - Preprocessing: ekstrak Bulan/Tahun, imputasi missing value, pilih skenario pemodelan.
-- Split kronologis 90% training / 10% testing (tanpa shuffle).
+- Split kronologis (90:10) atau **10-Fold Cross Validation** .
 - Encoding: one-hot kabupaten, sin-cos bulan, MinMaxScaler terpisah untuk X dan y.
-- Training PSO + SVR, metrik MAPE, grafik konvergensi, unduh CSV & model joblib.
+- Training PSO + SVR, metrik RMSE & R², grafik konvergensi, unduh CSV & model joblib.
 
 **Alur data:**
 1. Data masuk (wajib kolom iklim, lahan, wilayah, periode, dan **Produksi** sebagai target).
@@ -1753,15 +1756,6 @@ sebelum model dipakai untuk prediksi dan dievaluasi.
 **Kernel:** RBF atau ANOVA RBF | **PSO:** jumlah partikel, iterasi (w=0.7, c1=c2=1.5 tetap) |
 **SVR (range pencarian):** C, ε (epsilon), γ (gamma).
 """)
-    
-    # Custom MAPE function 
-    def calculate_mape(y_true, y_pred):
-        """Custom MAPE function dengan clipping 0-100%"""
-        y_true, y_pred = np.array(y_true), np.array(y_pred)
-        mask = y_true != 0
-        mape_values = np.abs((y_true[mask] - y_pred[mask]) / y_true[mask]) * 100
-        mape_values = np.clip(mape_values, 0, 100)  # Clip max 100%
-        return np.mean(mape_values) if len(mape_values) > 0 else float('inf')
     
     # ANOVA RBF kernel function
     def hitung_anova_rbf(X, Y, gamma, degree=2):
@@ -1800,6 +1794,10 @@ sebelum model dipakai untuk prediksi dan dievaluasi.
         st.session_state.scaler_X = None
     if 'scaler_y' not in st.session_state:
         st.session_state.scaler_y = None
+    if 'is_cv_mode' not in st.session_state:
+        st.session_state.is_cv_mode = False
+    if 'cv_results' not in st.session_state:
+        st.session_state.cv_results = None
     
     # Helper function untuk extract bulan dari Periode
     def extract_bulan_dari_periode(periode_str):
@@ -2184,15 +2182,23 @@ sebelum model dipakai untuk prediksi dan dievaluasi.
     section_header("📊 Step 4: Chronological Split Data (NO SHUFFLE)")
     
     split_ratio = st.selectbox(
-        "Rasio Split",
-        options=["90:10", "80:20", "70:30", "60:40", "50:50"],
+        "Metode Split",
+        options=["90:10", "80:20", "70:30", "60:40", "50:50", "90:10 dan 10-Fold Cross Validation"],
         key="split_ratio",
-        help="Pilih rasio pembagian training vs testing (Chronological order, NO SHUFFLE)"
+        help="Pilih rasio split kronologis atau 10-Fold CV "
     )
     
     if st.button("🔄 Chronological Split Data", use_container_width=True, key="split_btn"):
         try:
-            ratio = int(split_ratio.split(":")[0]) / 100
+            # Deteksi apakah mode CV
+            is_cv = "10-Fold Cross Validation" in split_ratio
+            st.session_state.is_cv_mode = is_cv
+            
+            # Untuk CV, ratio tetap 90:10 (90% training, 10% testing holdout)
+            if is_cv:
+                ratio = 0.9
+            else:
+                ratio = int(split_ratio.split(":")[0]) / 100
             
             # Gunakan scenario_data dari Step 3
             df_split = st.session_state.scenario_data.copy()
@@ -2232,25 +2238,83 @@ sebelum model dipakai untuk prediksi dan dievaluasi.
                 'feature_names': X.columns.tolist()
             }
             
+            # === INFORMASI SPLIT DETAIL ===
+            # Tabel gabungan dengan label split
+            df_split_view = df_split.copy()
+            split_labels = ['✅ Training'] * split_point + ['🧪 Testing'] * (len(df_split) - split_point)
+            df_split_view.insert(0, 'No', range(1, len(df_split) + 1))
+            df_split_view['Split'] = split_labels
+            
+            # Rentang waktu per split
+            if 'Tahun' in df_split.columns:
+                train_range = f"{int(df_split.iloc[:split_point]['Tahun'].min())} - {int(df_split.iloc[:split_point]['Tahun'].max())}"
+                test_range = f"{int(df_split.iloc[split_point:]['Tahun'].min())} - {int(df_split.iloc[split_point:]['Tahun'].max())}"
+            else:
+                train_range = test_range = "-"
+            
+            # Kabupaten per split
+            kab_col_split = next((c for c in ['Kabupaten/Kota', 'Kabupaten', 'kabupaten'] if c in df_split.columns), None)
+            train_kab = df_split.iloc[:split_point][kab_col_split].nunique() if kab_col_split else 0
+            test_kab = df_split.iloc[split_point:][kab_col_split].nunique() if kab_col_split else 0
+            
+            # Deteksi duplikat antar Training & Testing
+            cols_for_dup = [c for c in df_split.columns if c not in ['Produksi', 'produksi', 'Periode', 'periode']]
+            train_dup = df_split.iloc[:split_point][cols_for_dup].reset_index(drop=True)
+            test_dup = df_split.iloc[split_point:][cols_for_dup].reset_index(drop=True)
+            merged_dup = pd.merge(train_dup, test_dup, on=cols_for_dup, how='inner')
+            duplicate_count = len(merged_dup)
+            
+            # Simpan metadata ke session_state
+            st.session_state.split_data['train_indices'] = list(range(split_point))
+            st.session_state.split_data['test_indices'] = list(range(split_point, len(df_split)))
+            st.session_state.split_data['duplicate_count'] = duplicate_count
+            st.session_state.split_data['kab_count_train'] = train_kab
+            st.session_state.split_data['kab_count_test'] = test_kab
+            
             st.success(f"✅ Data berhasil di-split KRONOLOGIS dengan ratio {split_ratio}")
             st.info(f"📈 Training: {len(X_train)} data | Testing: {len(X_test)} data")
             st.warning(f"⚠️ Menggunakan chronological split (NO RANDOM SHUFFLE)")
             
             # Verify Bulan column is present
             if 'Bulan' in X_train.columns or 'bulan' in X_train.columns:
-                st.success("✅ VERIFIED: Kolom 'Bulan' berhasil dipertahankan untuk Step 6 (Sin-Cos Encoding)")
+                st.success("✅ Kolom 'Bulan' dipertahankan untuk Step 6 (Sin-Cos Encoding)")
             else:
-                st.warning("⚠️ WARNING: Kolom 'Bulan' tidak ditemukan - Sin-Cos Encoding mungkin skip di Step 6")
+                st.warning("⚠️ Kolom 'Bulan' tidak ditemukan - Sin-Cos Encoding akan di-skip")
             
-            with st.expander("Preview Split Data"):
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.markdown("**Training Set (5 baris pertama)**")
-                    st.dataframe(X_train.head(5), height=200)
-                with col2:
-                    st.markdown("**Testing Set (5 baris pertama)**")
-                    st.dataframe(X_test.head(5), height=200)
+            with st.expander("📋 Detail Split Data", expanded=True):
+                st.markdown("#### 📊 Ringkasan Split")
+                c1, c2, c3, c4 = st.columns(4)
+                with c1:
+                    st.metric("📈 Training", f"{len(X_train)} baris")
+                with c2:
+                    st.metric("🧪 Testing", f"{len(X_test)} baris")
+                with c3:
+                    st.metric("📅 Rentang Training", train_range)
+                with c4:
+                    st.metric("📅 Rentang Testing", test_range)
                 
+                if kab_col_split:
+                    ck1, ck2 = st.columns(2)
+                    with ck1:
+                        st.metric("🏛️ Kabupaten di Training", train_kab)
+                    with ck2:
+                        st.metric("🏛️ Kabupaten di Testing", test_kab)
+                
+                st.markdown("---")
+                st.markdown("#### 📋 Data Lengkap dengan Label Split")
+                st.caption("Kolom **Split** menandakan baris Training ✅ atau Testing 🧪")
+                st.dataframe(df_split_view, use_container_width=True, hide_index=True)
+                
+                st.markdown("---")
+                st.markdown("#### 🔍 Cek Duplikat Training vs Testing")
+                if duplicate_count > 0:
+                    st.warning(f"⚠️ Ditemukan **{duplicate_count}** baris duplikat antara Training dan Testing! Data identik muncul di kedua set.")
+                    with st.expander("Lihat Detail Duplikat"):
+                        st.dataframe(merged_dup, use_container_width=True)
+                else:
+                    st.success("✅ Tidak ada duplikat — semua baris Training unik vs Testing")
+                
+                st.markdown("---")
                 st.markdown("**Kolom dalam X_train:**")
                 st.write(X_train.columns.tolist())
         
@@ -2543,102 +2607,387 @@ sebelum model dipakai untuk prediksi dan dievaluasi.
     
     # ================= STEP 9: TRAINING MODEL PSO =================
     section_header("🚀 Step 9: Training Model SVR dengan PSO")
+
+    is_cv_mode = st.session_state.get('is_cv_mode', False)
+
+    if is_cv_mode:
+        st.info("📌 **Mode: 90:10 + 10-Fold Cross Validation**")
+    else:
+        st.info(f"📌 **Mode: Hold Out ({split_ratio})** — PSO langsung optimasi di data training")
     
-    if st.button("🎯 Mulai Training PSO (dengan Denormalisasi)", key="train_button", use_container_width=True):
+    if st.button("🎯 Mulai Training", key="train_button", use_container_width=True):
+        # Initialize placeholders early so exception handling can reference them
+        status_placeholder = st.empty()
+        progress_placeholder = st.empty()
+        metric_placeholder = st.empty()
+        params_placeholder = st.empty()
+        chart_placeholder = st.empty()
+        anim_placeholder = st.empty()
+
+        # Spinner characters for simple animation
+        spinner_chars = ['|', '/', '-', '\\']
+
+        def update_ui(iter_info, stage_label="Progress"):
+            try:
+                prog = float(iter_info.get('progress', 0.0))
+            except Exception:
+                prog = 0.0
+            # Clamp
+            prog = max(0.0, min(1.0, prog))
+            # Update progress bar
+            progress_placeholder.progress(prog)
+
+            # Iteration / metric
+            iteration = iter_info.get('iteration')
+            total = iter_info.get('total')
+            best_rmse = iter_info.get('best_rmse')
+            status_text = f"⏳ {stage_label}"
+            if iteration is not None and total is not None:
+                spin = spinner_chars[int(iteration) % len(spinner_chars)] if iteration is not None else ''
+                status_text += f" — Iter {iteration}/{total} {spin}"
+            status_placeholder.info(status_text)
+
+            # Metric
+            if best_rmse is not None:
+                metric_placeholder.metric("Best RMSE", id_format(best_rmse, 2))
+
+            # Best params
+            best_params = iter_info.get('best_params') or {}
+            if best_params:
+                params_placeholder.markdown(f"**Best params:** C={best_params.get('C')}  •  ε={best_params.get('epsilon')}  •  γ={best_params.get('gamma')}")
+
+            # RMSE history chart
+            rmse_hist = iter_info.get('rmse_history')
+            if rmse_hist:
+                try:
+                    import pandas as _pd
+                    chart_placeholder.line_chart(_pd.DataFrame({'rmse': rmse_hist}))
+                except Exception:
+                    # fallback: simple text
+                    chart_placeholder.text(f"RMSE history: {rmse_hist[-5:]}")
         try:
-            status_placeholder = st.empty()
-            progress_placeholder = st.empty()
-            metric_placeholder = st.empty()
+            start_all = time.time()
+            faktor_cv = 5 if is_cv_mode else 1
+            est_detik = n_particles * n_iter * faktor_cv * 3
+            if est_detik > 60:
+                est_str = f"{est_detik // 60} menit {est_detik % 60} detik"
+            else:
+                est_str = f"{est_detik} detik"
             
-            status_placeholder.info(f"⏳ Initializing PSO Training dengan kernel {kernel_choice}...")
+            st.info(f"⏳ **Estimasi: ~{est_str}**")
+            st.warning("⚠️ **Jangan refresh halaman selama training berjalan!**")
             
-            # Use scaled y for training
-            if kernel_choice == "RBF":
-                from models.svr_fast import pso_training
+            if is_cv_mode and kernel_choice == "RBF":
+                # ===== CV MODE: 3 Tahap dengan RBF =====
+                from models.svr_fast import pso_training_cv, validate_cv_fast, train_final_model_fast
+                
+                # Stage 1: PSO Optimization 
+                status_placeholder.info("⏳ **Tahap 1/3:** PSO Optimization...")
+                results_pso = None
+                for iter_info in pso_training_cv(
+                    X_train.values, y_train_scaled, st.session_state.scaler_y,
+                    n_particles, n_iter, c_min, c_max, epsilon_min, epsilon_max, gamma_min, gamma_max,
+                    w=w, c1=c1, c2=c2, n_folds=5
+                ):
+                    # Update interactive UI (progress bar, metric, params, chart, spinner)
+                    update_ui(iter_info, stage_label="Tahap 1/3: PSO Optimization ")
+                    results_pso = iter_info
+                
+                best_params = results_pso.get('best_params', {'C': 1, 'epsilon': 0.1, 'gamma': 0.01})
+                rmse_history = results_pso.get('rmse_history', [])
+                
+                status_placeholder.success(f"✅ Tahap 1 selesai! Best Avg RMSE : {id_format(results_pso['best_rmse'], 2)}")
+                
+                # Stage 2: Validate with 10-Fold CV
+                status_placeholder.info("⏳ **Tahap 2/3:** Validasi dengan 10-Fold CV...")
+                fold_results, avg_val_rmse = validate_cv_fast(
+                    best_params, X_train.values, y_train_scaled,
+                    st.session_state.scaler_y, n_folds=10
+                )
+                progress_placeholder.progress(0.85)
+                
+                st.session_state.cv_results = {
+                    'fold_results': fold_results,
+                    'avg_val_rmse': avg_val_rmse
+                }
+                
+                status_placeholder.success(f"✅ Tahap 2 selesai! Avg RMSE (10-Fold): {id_format(avg_val_rmse, 2)}")
+                
+                # Stage 3: Final Training & Testing
+                status_placeholder.info("⏳ **Tahap 3/3:** Final Training di 100% data + Testing di data holdout 10%...")
+                model, y_pred_asli, y_test_asli, test_rmse, test_r2 = train_final_model_fast(
+                    best_params, X_train.values, y_train_scaled,
+                    st.session_state.scaler_y, X_test.values, y_test_scaled
+                )
+                progress_placeholder.progress(0.95)
+                if y_pred_asli is not None:
+                    y_pred_asli = np.clip(y_pred_asli, 0, None)
+                # Get training predictions for CV RBF
+                y_pred_train_scaled = model.predict(X_train.values)
+                y_pred_train_asli = st.session_state.scaler_y.inverse_transform(y_pred_train_scaled.reshape(-1, 1)).ravel()
+                y_pred_train_asli = np.clip(y_pred_train_asli, 0, None)
+                train_rmse = float(np.sqrt(mean_squared_error(y_train, y_pred_train_asli)))
+                ss_res_train = np.sum((y_train - y_pred_train_asli) ** 2)
+                ss_tot_train = np.sum((y_train - np.mean(y_train)) ** 2)
+                train_r2 = float(1 - ss_res_train / ss_tot_train) if ss_tot_train != 0 else 0.0
+                st.session_state.training_results = {
+                    'best_params': best_params,
+                    'rmse': test_rmse,
+                    'r2': test_r2,
+                    'train_rmse': train_rmse,
+                    'train_r2': train_r2,
+                    'predictions': y_pred_asli,
+                    'y_test': y_test_asli,
+                    'predictions_train': y_pred_train_asli,
+                    'y_train': y_train,
+                    'rmse_history': rmse_history,
+                    'model': model,
+                    'particles': n_particles,
+                    'iterasi': n_iter,
+                    'kernel': kernel_choice,
+                    'scaler_y': st.session_state.scaler_y,
+                    'scaler_X': st.session_state.scaler_X,
+                    'feature_columns': list(X_train.columns),
+                    'scenario': st.session_state.scenario_choice,
+                    'split_ratio': split_ratio,
+                    'is_cv': True,
+                    'cv_avg_rmse_5fold': results_pso['best_rmse'],
+                    'cv_avg_rmse_10fold': avg_val_rmse,
+                }
+                
+                progress_placeholder.progress(1.0)
+                metric_placeholder.empty()
+                status_placeholder.success(f"✅ Training Selesai! Train RMSE: {id_format(train_rmse, 2)} | Test RMSE: {id_format(test_rmse, 2)}")
+                
+            elif is_cv_mode and kernel_choice == "ANOVA RBF":
+                # ===== CV MODE: 3 Tahap dengan ANOVA RBF =====
+                from models.svr_anova import pso_training_cv_anova, validate_cv_anova, train_final_model_anova
+                
+                # Stage 1: PSO Optimization 
+                status_placeholder.info("⏳ **Tahap 1/3:** PSO Optimization dengan CV (ANOVA RBF)...")
+                results_pso = None
+                for iter_info in pso_training_cv_anova(
+                    X_train.values, y_train_scaled, st.session_state.scaler_y,
+                    n_particles, n_iter, c_min, c_max, epsilon_min, epsilon_max, gamma_min, gamma_max,
+                    w=w, c1=c1, c2=c2, n_folds=5
+                ):
+                    # Update interactive UI (progress bar, metric, params, chart, spinner)
+                    update_ui(iter_info, stage_label="Tahap 1/3: PSO Optimization (ANOVA)")
+                    results_pso = iter_info
+                
+                best_params = results_pso.get('best_params', {'C': 1, 'epsilon': 0.1, 'gamma': 0.01})
+                rmse_history = results_pso.get('rmse_history', [])
+                
+                status_placeholder.success(f"✅ Tahap 1 selesai! Best Avg RMSE: {id_format(results_pso['best_rmse'], 2)}")
+                
+                # Stage 2: Validate with 10-Fold CV
+                status_placeholder.info("⏳ **Tahap 2/3:** Validasi dengan 10-Fold CV (ANOVA RBF)...")
+                fold_results, avg_val_rmse = validate_cv_anova(
+                    best_params, X_train.values, y_train_scaled,
+                    st.session_state.scaler_y, n_folds=10
+                )
+                progress_placeholder.progress(0.85)
+                
+                st.session_state.cv_results = {
+                    'fold_results': fold_results,
+                    'avg_val_rmse': avg_val_rmse
+                }
+                
+                status_placeholder.success(f"✅ Tahap 2 selesai! Avg RMSE (10-Fold): {id_format(avg_val_rmse, 2)}")
+                
+                # Stage 3: Final Training & Testing
+                status_placeholder.info("⏳ **Tahap 3/3:** Final Training + Testing...")
+                model, y_pred_asli, y_test_asli, test_rmse, test_r2 = train_final_model_anova(
+                    best_params, X_train.values, y_train_scaled,
+                    st.session_state.scaler_y, X_test.values, y_test_scaled
+                )
+                progress_placeholder.progress(0.95)
+                if y_pred_asli is not None:
+                    y_pred_asli = np.clip(y_pred_asli, 0, None)
+                # Get training predictions for CV ANOVA
+                y_pred_train_scaled = model.predict(X_train.values)
+                y_pred_train_asli = st.session_state.scaler_y.inverse_transform(y_pred_train_scaled.reshape(-1, 1)).ravel()
+                y_pred_train_asli = np.clip(y_pred_train_asli, 0, None)
+                train_rmse = float(np.sqrt(mean_squared_error(y_train, y_pred_train_asli)))
+                ss_res_train = np.sum((y_train - y_pred_train_asli) ** 2)
+                ss_tot_train = np.sum((y_train - np.mean(y_train)) ** 2)
+                train_r2 = float(1 - ss_res_train / ss_tot_train) if ss_tot_train != 0 else 0.0
+                st.session_state.training_results = {
+                    'best_params': best_params,
+                    'rmse': test_rmse,
+                    'r2': test_r2,
+                    'train_rmse': train_rmse,
+                    'train_r2': train_r2,
+                    'predictions': y_pred_asli,
+                    'y_test': y_test_asli,
+                    'predictions_train': y_pred_train_asli,
+                    'y_train': y_train,
+                    'rmse_history': rmse_history,
+                    'model': model,
+                    'particles': n_particles,
+                    'iterasi': n_iter,
+                    'kernel': kernel_choice,
+                    'scaler_y': st.session_state.scaler_y,
+                    'scaler_X': st.session_state.scaler_X,
+                    'feature_columns': list(X_train.columns),
+                    'scenario': st.session_state.scenario_choice,
+                    'split_ratio': split_ratio,
+                    'is_cv': True,
+                    'cv_avg_rmse_5fold': results_pso['best_rmse'],
+                    'cv_avg_rmse_10fold': avg_val_rmse,
+                }
+                
+                progress_placeholder.progress(1.0)
+                metric_placeholder.empty()
+                status_placeholder.success(f"✅ Training Selesai! Train RMSE: {id_format(train_rmse, 2)} | Test RMSE: {id_format(test_rmse, 2)}")
+                
+            elif kernel_choice == "RBF":
+                # ===== HOLD OUT MODE: RBF (direct, no KFold) =====
+                from models.svr_fast import pso_training_direct
+                
+                status_placeholder.info(f"⏳ PSO Training dengan kernel RBF (Hold Out)...")
                 
                 results_pso = None
-                for iter_info in pso_training(
+                for iter_info in pso_training_direct(
                     X_train.values, y_train_scaled, X_test.values, y_test_scaled,
+                    st.session_state.scaler_y,
                     n_particles, n_iter, c_min, c_max, epsilon_min, epsilon_max, gamma_min, gamma_max,
                     w=w, c1=c1, c2=c2
                 ):
-                    pct = iter_info['progress'] * 100
-                    progress_placeholder.progress(iter_info['progress'])
-                    metric_placeholder.metric(
-                        f"Iter {iter_info['iteration']}/{iter_info['total']}", 
-                        f"MAPE: {id_format(iter_info['best_mape'], 2)}%"
-                    )
+                    # Update interactive UI (progress bar, metric, params, chart, spinner)
+                    update_ui(iter_info, stage_label="PSO Training (Hold Out - RBF)")
                     results_pso = iter_info
+
+                best_params = results_pso.get('best_params', {'C': 1, 'epsilon': 0.1, 'gamma': 0.01})
+                rmse_history = results_pso.get('rmse_history', [])
+                model = results_pso.get('model')
+                y_pred_scaled = results_pso.get('predictions')
+
+                if y_pred_scaled is not None:
+                    y_pred_asli = st.session_state.scaler_y.inverse_transform(y_pred_scaled.reshape(-1, 1)).ravel()
+                    y_pred_asli = np.clip(y_pred_asli, 0, None)
+                    y_test_asli = st.session_state.scaler_y.inverse_transform(y_test_scaled.reshape(-1, 1)).ravel()
+                    test_rmse = float(np.sqrt(mean_squared_error(y_test_asli, y_pred_asli)))
+                    ss_res = np.sum((y_test_asli - y_pred_asli) ** 2)
+                    ss_tot = np.sum((y_test_asli - np.mean(y_test_asli)) ** 2)
+                    test_r2 = float(1 - ss_res / ss_tot) if ss_tot != 0 else 0.0
+                    # Get training predictions for Holdout RBF
+                    y_pred_train_scaled = model.predict(X_train.values)
+                    y_pred_train_asli = st.session_state.scaler_y.inverse_transform(y_pred_train_scaled.reshape(-1, 1)).ravel()
+                    y_pred_train_asli = np.clip(y_pred_train_asli, 0, None)
+                    train_rmse = float(np.sqrt(mean_squared_error(y_train, y_pred_train_asli)))
+                    ss_res_train = np.sum((y_train - y_pred_train_asli) ** 2)
+                    ss_tot_train = np.sum((y_train - np.mean(y_train)) ** 2)
+                    train_r2 = float(1 - ss_res_train / ss_tot_train) if ss_tot_train != 0 else 0.0
+                else:
+                    y_pred_asli = None
+                    y_test_asli = None
+                    test_rmse = float('inf')
+                    test_r2 = 0.0
+                    y_pred_train_asli = None
+                    train_rmse = float('inf')
+                    train_r2 = 0.0
+
+                st.session_state.training_results = {
+                    'best_params': best_params,
+                    'rmse': test_rmse,
+                    'r2': test_r2,
+                    'train_rmse': train_rmse,
+                    'train_r2': train_r2,
+                    'predictions': y_pred_asli,
+                    'y_test': y_test_asli,
+                    'predictions_train': y_pred_train_asli,
+                    'y_train': y_train,
+                    'rmse_history': rmse_history,
+                    'model': model,
+                    'particles': n_particles,
+                    'iterasi': n_iter,
+                    'kernel': kernel_choice,
+                    'scaler_y': st.session_state.scaler_y,
+                    'scaler_X': st.session_state.scaler_X,
+                    'feature_columns': list(X_train.columns),
+                    'scenario': st.session_state.scenario_choice,
+                    'split_ratio': split_ratio,
+                    'is_cv': False,
+                }
+
+                progress_placeholder.progress(1.0)
+                metric_placeholder.empty()
+                status_placeholder.success(f"✅ Training Selesai! Train RMSE: {id_format(train_rmse, 2)} | Test RMSE: {id_format(test_rmse, 2)}")
+
             else:
-                from models.svr_anova import pso_training_anova
+                # ===== HOLD OUT MODE: ANOVA RBF (direct, no KFold) =====
+                from models.svr_anova import pso_training_direct_anova
+                
+                status_placeholder.info(f"⏳ PSO Training dengan kernel ANOVA RBF (Hold Out)...")
                 
                 results_pso = None
-                for iter_info in pso_training_anova(
+                for iter_info in pso_training_direct_anova(
                     X_train.values, y_train_scaled, X_test.values, y_test_scaled,
+                    st.session_state.scaler_y,
                     n_particles, n_iter, c_min, c_max, epsilon_min, epsilon_max, gamma_min, gamma_max,
                     w=w, c1=c1, c2=c2
                 ):
-                    pct = iter_info['progress'] * 100
-                    progress_placeholder.progress(iter_info['progress'])
-                    metric_placeholder.metric(
-                        f"Iter {iter_info['iteration']}/{iter_info['total']}", 
-                        f"MAPE: {id_format(iter_info['best_mape'], 2)}%"
-                    )
+                    # Update interactive UI (progress bar, metric, params, chart, spinner)
+                    update_ui(iter_info, stage_label="PSO Training (Hold Out - ANOVA)")
                     results_pso = iter_info
-            
-            # Get final PSO results
-            final_pso = results_pso
-            best_params = final_pso.get('best_params', {'C': 1, 'epsilon': 0.1, 'gamma': 'scale'})
-            
-            # Get predictions in SCALED form
-            y_pred_scaled = final_pso.get('predictions', None)
-            model = final_pso.get('model', None)
-            mape_history = final_pso.get('mape_history', [])
-            
-            # DENORMALISASI predictions balik ke original scale
-            if y_pred_scaled is not None and len(y_pred_scaled) > 0 and not np.any(np.isnan(y_pred_scaled)):
-                y_pred_original = st.session_state.scaler_y.inverse_transform(y_pred_scaled.reshape(-1, 1)).ravel()
-                y_test_original = st.session_state.normalized_data['y_test_original']
-                
-                # Use original y_test dan denormalized predictions untuk evaluasi
-                best_mape = calculate_mape(y_test_original, y_pred_original)  # Custom MAPE
-                mae = mean_absolute_error(y_test_original, y_pred_original)
-                mse = mean_squared_error(y_test_original, y_pred_original)
-                r2 = r2_score(y_test_original, y_pred_original)
-                rmse = np.sqrt(mse)
-            else:
-                mae = mse = r2 = rmse = best_mape = float('inf')
-                y_pred_original = None
-                y_test_original = None
-            
-            st.session_state.training_results = {
-                'best_params': best_params,
-                'best_mape': best_mape,
-                'rmse': rmse,
-                'mae': mae,
-                'mse': mse,
-                'r2': r2,
-                'predictions': y_pred_original,  # Denormalized predictions
-                'y_test': y_test_original,  # Original y_test
-                'mape_progress': mape_history,
-                'model': model,
-                'particles': n_particles,
-                'iterasi': n_iter,
-                'kernel': kernel_choice,
-                'y_pred_scaled': y_pred_scaled,  # Store scaled for reference
-                'scaler_y': st.session_state.scaler_y,
-                'scaler_X': st.session_state.scaler_X,
-                'feature_columns': list(X_train.columns),
-                'scenario': st.session_state.scenario_choice,
-            }
-            
-            progress_placeholder.progress(1.0)
-            metric_placeholder.empty()
-            
-            if best_mape == float('inf') or y_pred_original is None:
-                status_placeholder.error(f"❌ Training Gagal - semua parameter menghasilkan MAPE inf atau predictions invalid")
-            else:
-                status_placeholder.success(f"✅ Training Selesai! Best MAPE (Denormalized): {id_format(best_mape, 2)}%")
+
+                best_params = results_pso.get('best_params', {'C': 1, 'epsilon': 0.1, 'gamma': 0.01})
+                rmse_history = results_pso.get('rmse_history', [])
+                model = results_pso.get('model')
+                y_pred_scaled = results_pso.get('predictions')
+
+                if y_pred_scaled is not None:
+                    y_pred_asli = st.session_state.scaler_y.inverse_transform(y_pred_scaled.reshape(-1, 1)).ravel()
+                    y_pred_asli = np.clip(y_pred_asli, 0, None)
+                    y_test_asli = st.session_state.scaler_y.inverse_transform(y_test_scaled.reshape(-1, 1)).ravel()
+                    test_rmse = float(np.sqrt(mean_squared_error(y_test_asli, y_pred_asli)))
+                    ss_res = np.sum((y_test_asli - y_pred_asli) ** 2)
+                    ss_tot = np.sum((y_test_asli - np.mean(y_test_asli)) ** 2)
+                    test_r2 = float(1 - ss_res / ss_tot) if ss_tot != 0 else 0.0
+                    # Get training predictions for Holdout ANOVA
+                    y_pred_train_scaled = model.predict(X_train.values)
+                    y_pred_train_asli = st.session_state.scaler_y.inverse_transform(y_pred_train_scaled.reshape(-1, 1)).ravel()
+                    y_pred_train_asli = np.clip(y_pred_train_asli, 0, None)
+                    train_rmse = float(np.sqrt(mean_squared_error(y_train, y_pred_train_asli)))
+                    ss_res_train = np.sum((y_train - y_pred_train_asli) ** 2)
+                    ss_tot_train = np.sum((y_train - np.mean(y_train)) ** 2)
+                    train_r2 = float(1 - ss_res_train / ss_tot_train) if ss_tot_train != 0 else 0.0
+                else:
+                    y_pred_asli = None
+                    y_test_asli = None
+                    test_rmse = float('inf')
+                    test_r2 = 0.0
+                    y_pred_train_asli = None
+                    train_rmse = float('inf')
+                    train_r2 = 0.0
+
+                st.session_state.training_results = {
+                    'best_params': best_params,
+                    'rmse': test_rmse,
+                    'r2': test_r2,
+                    'train_rmse': train_rmse,
+                    'train_r2': train_r2,
+                    'predictions': y_pred_asli,
+                    'y_test': y_test_asli,
+                    'predictions_train': y_pred_train_asli,
+                    'y_train': y_train,
+                    'rmse_history': rmse_history,
+                    'model': model,
+                    'particles': n_particles,
+                    'iterasi': n_iter,
+                    'kernel': kernel_choice,
+                    'scaler_y': st.session_state.scaler_y,
+                    'scaler_X': st.session_state.scaler_X,
+                    'feature_columns': list(X_train.columns),
+                    'scenario': st.session_state.scenario_choice,
+                    'split_ratio': split_ratio,
+                    'is_cv': False,
+                }
+
+                progress_placeholder.progress(1.0)
+                metric_placeholder.empty()
+                status_placeholder.success(f"✅ Training Selesai! Train RMSE: {id_format(train_rmse, 2)} | Test RMSE: {id_format(test_rmse, 2)}")
         
         except Exception as e:
             status_placeholder.error(f"❌ Error: {str(e)}")
@@ -2650,26 +2999,28 @@ sebelum model dipakai untuk prediksi dan dievaluasi.
         st.warning("⚠️ Silakan lakukan training terlebih dahulu")
         return
     
-    # ================= STEP 10: HASIL DAN VISUALISASI (DENORMALIZED) =================
+    # ================= STEP 10: HASIL DAN VISUALISASI =================
     section_header("📊 Step 10: Hasil Prediksi")
     
     results = st.session_state.training_results
     
-    # Validate results before displaying
+    # Validate results
     if results.get('predictions') is None or results.get('y_test') is None:
         st.error("❌ Training gagal - predictions atau y_test tidak valid")
-        st.error(f"Best MAPE: {results.get('best_mape', 'N/A')}")
-        
         if results.get('kernel') == 'ANOVA RBF':
             st.warning("⚠️ Kernel ANOVA RBF mungkin tidak compatible dengan data ini. Coba gunakan kernel RBF.")
         return
     
-    if np.isinf(results.get('best_mape', 0)) or results.get('best_mape', 0) == 0:
-        st.error(f"❌ Training tidak berhasil - MAPE: {results.get('best_mape', 'invalid')}")
+    if np.isinf(results.get('rmse', 0)):
+        st.error("❌ Training tidak berhasil - RMSE tidak valid")
         if results.get('kernel') == 'ANOVA RBF':
             st.warning("⚠️ Kernel ANOVA RBF mungkin tidak compatible dengan data ini. Coba gunakan kernel RBF.")
         return
     
+    # Pastikan semua prediksi non-negatif
+    if results.get('predictions') is not None:
+        results['predictions'] = np.clip(results['predictions'], 0, None)
+
     st.info("✅ Hasil prediksi telah di-**DENORMALISASI** ke satuan TON asli menggunakan scaler_y")
     
     # Training Configuration Info
@@ -2692,20 +3043,76 @@ sebelum model dipakai untuk prediksi dan dievaluasi.
         section_header("🎯 Skenario Pemodelan yang Digunakan", level=3)
         st.info(f"**Skenario:** {st.session_state.scenario_choice}")
     
+    # CV Results Summary (if CV mode)
+    if results.get('is_cv', False):
+        st.divider()
+        section_header("🔬 Validasi Cross-Validation", level=3)
+        col2, = st.columns(1)
+        with col2:
+            st.markdown(metric_card("Avg RMSE (10-Fold Validasi)", f"{id_format(results.get('cv_avg_rmse_10fold', 0), 2)}", "📈"), unsafe_allow_html=True)
+        
+        # Per-fold results table
+        cv_results = st.session_state.get('cv_results', None)
+        if cv_results and cv_results.get('fold_results'):
+            with st.expander("📋 Detail RMSE per Fold (10-Fold Validasi)", expanded=False):
+                fold_df = pd.DataFrame(cv_results['fold_results'])
+                fold_df.columns = ['Fold', 'RMSE', 'N Train', 'N Val']
+                fold_df['RMSE'] = fold_df['RMSE'].apply(lambda x: f"{x:,.2f}")
+                st.dataframe(fold_df, use_container_width=True, hide_index=True)
+                
+                # Bar chart per fold
+                fig_fold, ax_fold = plt.subplots(figsize=(10, 3))
+                folds_plot = cv_results['fold_results']
+                rmse_vals = [f['rmse'] for f in folds_plot]
+                ax_fold.bar(range(1, len(rmse_vals)+1), rmse_vals, color='#2e7d32', alpha=0.7, edgecolor='#1b5e20')
+                ax_fold.axhline(y=cv_results['avg_val_rmse'], color='#d32f2f', linestyle='--', linewidth=2, label=f"Rata-rata: {cv_results['avg_val_rmse']:.2f}")
+                ax_fold.set_xlabel("Fold ke-", fontsize=10, fontweight='bold')
+                ax_fold.set_ylabel("RMSE", fontsize=10, fontweight='bold')
+                ax_fold.set_title("RMSE per Fold (10-Fold Validasi)", fontsize=11, fontweight='bold')
+                ax_fold.legend(fontsize=9)
+                ax_fold.grid(True, alpha=0.3)
+                st.pyplot(fig_fold, use_container_width=True)
+    
     st.divider()
     section_header("📈 Metrik Performa Model", level=3)
+
+    # Use only RMSE and R² for evaluation (training & testing)
+    train_rmse = results.get('train_rmse', float('nan'))
+    train_r2 = results.get('train_r2', float('nan'))
+    test_rmse = results.get('rmse', float('nan'))
+    test_r2 = results.get('r2', float('nan'))
+
+    # Compact, responsive two-column layout
     
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown(metric_card("MAPE", f"{id_format(results['best_mape'], 2)}%", "📊"), unsafe_allow_html=True)
-    with col2:
-        st.markdown(metric_card("MAE", f"{id_format(results['mae'], 2)}", "📉"), unsafe_allow_html=True)
-    col3, col4 = st.columns(2)
-    with col3:
-        st.markdown(metric_card("RMSE", f"{id_format(results['rmse'], 2)}", "📈"), unsafe_allow_html=True)
-    with col4:
-        st.markdown(metric_card("MSE", f"{id_format(results['mse'], 2)}", "🎯"), unsafe_allow_html=True)
-    st.markdown(metric_card("R² Score", f"{id_format(results['r2'], 4)}", "✨"), unsafe_allow_html=True)
+    col_train, col_test = st.columns([1, 1], gap='large')
+
+    train_title = """
+    <div style="background: #e8f5e9; padding: 12px 16px; border-radius: 10px; margin-bottom: 10px; color: #1b5e20; font-weight: 700; font-size: 1rem;">
+        📚 Metrik Training
+    </div>
+    """
+
+    test_title = """
+    <div style="background: #e3f2fd; padding: 12px 16px; border-radius: 10px; margin-bottom: 10px; color: #0d47a1; font-weight: 700; font-size: 1rem;">
+        🧪 Metrik Testing
+    </div>
+    """
+
+    with col_train:
+        st.markdown(train_title, unsafe_allow_html=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric(label="RMSE", value=f"{id_format(train_rmse, 2)}")
+        with c2:
+            st.metric(label="R² Score", value=f"{id_format(train_r2, 4)}")
+
+    with col_test:
+        st.markdown(test_title, unsafe_allow_html=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric(label="RMSE", value=f"{id_format(test_rmse, 2)}")
+        with c2:
+            st.metric(label="R² Score", value=f"{id_format(test_r2, 4)}")
     
     # Best Parameters
     section_header("⚙️ Parameter Terbaik", level=3)
@@ -2717,13 +3124,13 @@ sebelum model dipakai untuk prediksi dan dievaluasi.
     with col3:
         st.write(f"**Gamma:** {results['best_params']['gamma']}")
     
-    # Graph: MAPE Progress
-    section_header("📊 Grafik: Progres MAPE per Iterasi PSO", level=3)
+    # Graph: RMSE Progress
+    section_header("📊 Grafik: Progres RMSE per Iterasi PSO", level=3)
     
     fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(results['mape_progress'], marker='o', linewidth=2, markersize=4, color='#2e7d32')
+    ax.plot(results['rmse_history'], marker='o', linewidth=2, markersize=4, color='#2e7d32')
     ax.set_xlabel("Iterasi", fontsize=11, fontweight='bold')
-    ax.set_ylabel("MAPE (%)", fontsize=11, fontweight='bold')
+    ax.set_ylabel("RMSE", fontsize=11, fontweight='bold')
     ax.set_title(f"Konvergensi PSO - Kernel: {results.get('kernel', 'RBF')}", fontsize=12, fontweight='bold')
     ax.grid(True, alpha=0.3)
     st.pyplot(fig, use_container_width=True)
@@ -2748,7 +3155,6 @@ sebelum model dipakai untuk prediksi dan dievaluasi.
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.scatter(results['y_test'], results['predictions'], alpha=0.6, s=80, color='#2e7d32')
     
-    # Add diagonal line (perfect prediction)
     min_val = min(results['y_test'].min(), results['predictions'].min())
     max_val = max(results['y_test'].max(), results['predictions'].max())
     ax.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='Perfect Prediction')
@@ -2760,25 +3166,17 @@ sebelum model dipakai untuk prediksi dan dievaluasi.
     ax.grid(True, alpha=0.3)
     st.pyplot(fig, use_container_width=True)
     
-    # Tabel Preview (Denormalized)
+    # Tabel Preview
     section_header("📋 Tabel: Preview Prediksi", level=3)
     
     X_test_orig = st.session_state.split_data['X_test'].reset_index(drop=True)
     
-    # Detect available columns for Kabupaten/Kota, Bulan, Tahun
     kab_col = next((c for c in ['Kabupaten/Kota', 'Kabupaten', 'kabupaten'] if c in X_test_orig.columns), None)
     bulan_col = next((c for c in ['Bulan', 'bulan'] if c in X_test_orig.columns), None)
     tahun_col = next((c for c in ['Tahun', 'tahun'] if c in X_test_orig.columns), None)
     
-    # Calculate MAPE per data point (clipped to 0-100%)
-    mape_per_point = np.where(
-        results['y_test'] != 0,
-        np.abs((results['y_test'] - results['predictions']) / results['y_test'] * 100),
-        0
-    )
-    mape_per_point = np.clip(mape_per_point, 0, 100)
+    abs_error = np.abs(results['y_test'] - results['predictions'])
     
-    # Build preview dataframe with original feature columns
     preview_data = {}
     if kab_col:
         preview_data['Kabupaten/Kota'] = X_test_orig[kab_col].values
@@ -2788,8 +3186,7 @@ sebelum model dipakai untuk prediksi dan dievaluasi.
         preview_data['Tahun'] = X_test_orig[tahun_col].values
     preview_data['Data Aktual (Ton)'] = [id_format(x, 2) for x in results['y_test']]
     preview_data['Prediksi (Ton)'] = [id_format(x, 2) for x in results['predictions']]
-    preview_data['Error (Ton)'] = [id_format(x, 2) for x in (results['y_test'] - results['predictions'])]
-    preview_data['Error (%)'] = [id_format(x, 2) for x in mape_per_point]
+    preview_data['Error (Ton)'] = [id_format(x, 2) for x in abs_error]
     
     preview_df = pd.DataFrame(preview_data)
     st.dataframe(preview_df, use_container_width=True)

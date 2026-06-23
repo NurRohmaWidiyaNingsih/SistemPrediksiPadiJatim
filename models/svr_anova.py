@@ -1,152 +1,130 @@
 """
-Fast SVR ANOVA RBF Training Module - Simplified version
-Based on custom ANOVA RBF kernel with PSO optimization
+Fast SVR ANOVA RBF Training Module
+Fitness: RMSE (denormalized ke Ton)
+- pso_training_direct_anova(): Holdout mode
+- pso_training_cv_anova(): CV mode dengan K-Fold
+- validate_cv_anova(): Validasi parameter tunggal di N fold
+- train_final_model_anova(): Final train + test
 """
 import numpy as np
 from sklearn.svm import SVR
-from sklearn.metrics import mean_absolute_percentage_error, mean_squared_error
+from sklearn.metrics import mean_squared_error
+from sklearn.model_selection import KFold
 import time
 from functools import partial
 
-def calculate_mape(y_true, y_pred):
-    """Calculate MAPE - sesuai dengan formula di Colab"""
-    y_true, y_pred = np.array(y_true), np.array(y_pred)
-    mask = y_true != 0
-    if np.sum(mask) == 0:
-        return 0.0 
-    y_true_filtered = y_true[mask]
-    y_pred_filtered = y_pred[mask]
-    mape_values = np.abs((y_true_filtered - y_pred_filtered) / y_true_filtered) * 100
-    mape_values = np.clip(mape_values, 0, 100)  # Batasi maksimal 100% per data point
-    return np.mean(mape_values)
 
 def hitung_anova_rbf(X, Y, gamma, degree=2):
-    """Custom ANOVA RBF kernel"""
-    X = np.asarray(X)
-    Y = np.asarray(Y)
+    X = np.asarray(X, dtype=np.float64)
+    Y = np.asarray(Y, dtype=np.float64)
     K = np.zeros((X.shape[0], Y.shape[0]))
-    
     for k in range(X.shape[1]):
         diff_sq = (X[:, k].reshape(-1, 1) - Y[:, k].reshape(1, -1)) ** 2
         K += np.exp(-gamma * diff_sq)
-        
-    # Dibagi jumlah fitur agar nilai matriks stabil (Normalized Kernel)
-    K = K / X.shape[1] 
-    
+    K = K / X.shape[1]
     return K ** degree
 
-def evaluate_svr_anova(C, epsilon, gamma, X_train, y_train, X_test, y_test, timeout=8, max_iter=10000):
-    """Quick SVR ANOVA RBF evaluation with timeout - sesuai dengan Colab setting"""
-    start = time.time()
+
+def evaluate_direct_anova(params, X_train, y_train, X_test, y_test, scaler_y, timeout=20):
+    """Evaluasi ANOVA langsung: train-test, RMSE denormalized"""
+    C, epsilon, gamma = params
     try:
-        # ✅ KONVERSI KE FLOAT64 UNTUK PRECISION SEPERTI COLAB (CRITICAL!)
-        X_train = np.asarray(X_train, dtype=np.float64)
-        y_train = np.asarray(y_train, dtype=np.float64)
-        X_test = np.asarray(X_test, dtype=np.float64)
-        y_test = np.asarray(y_test, dtype=np.float64)
-        
-        # Ensure arrays are valid
-        # Validate inputs
-        if X_train.shape[0] == 0 or X_test.shape[0] == 0:
+        X_train_a = np.asarray(X_train, dtype=np.float64)
+        y_train_a = np.asarray(y_train, dtype=np.float64)
+        X_test_a = np.asarray(X_test, dtype=np.float64)
+        y_test_a = np.asarray(y_test, dtype=np.float64)
+
+        if X_train_a.shape[0] == 0 or X_test_a.shape[0] == 0:
             return float('inf'), None, None
-        
-        if np.any(np.isnan(X_train)) or np.any(np.isinf(X_train)):
+        if np.any(np.isnan(X_train_a)) or np.any(np.isinf(X_train_a)):
             return float('inf'), None, None
-        
-        # Use partial to pass gamma to kernel function
-        kernel_func = partial(hitung_anova_rbf, gamma=gamma)
-        model = SVR(kernel=kernel_func, C=C, epsilon=epsilon, max_iter=max_iter)
-        model.fit(X_train, y_train)
-        
-        # Check timeout
-        if time.time() - start > timeout:
+
+        kernel_func = partial(hitung_anova_rbf, gamma=float(gamma))
+        model = SVR(kernel=kernel_func, C=float(C), epsilon=float(epsilon), max_iter=10000)
+        model.fit(X_train_a, y_train_a)
+
+        y_pred_sc = model.predict(X_test_a)
+        if np.any(np.isnan(y_pred_sc)) or np.any(np.isinf(y_pred_sc)):
             return float('inf'), None, None
-        
-        y_pred = model.predict(X_test)
-        
-        # Validate predictions
-        if np.any(np.isnan(y_pred)) or np.any(np.isinf(y_pred)):
-            return float('inf'), None, None
-        
-        mape_score = calculate_mape(y_test, y_pred)
-        
-        # If MAPE is inf or nan, return inf
-        if np.isnan(mape_score) or np.isinf(mape_score):
-            return float('inf'), None, None
-        
-        return mape_score, y_pred, model
-    except Exception as e:
+
+        y_pred_asli = scaler_y.inverse_transform(y_pred_sc.reshape(-1, 1)).ravel()
+        y_test_asli = scaler_y.inverse_transform(y_test_a.reshape(-1, 1)).ravel()
+        y_pred_asli = np.clip(y_pred_asli, 0, None)
+        rmse = float(np.sqrt(mean_squared_error(y_test_asli, y_pred_asli)))
+        return rmse, y_pred_sc, model
+    except Exception:
         return float('inf'), None, None
 
-def pso_training_anova(X_train, y_train, X_test, y_test, 
-                       n_particles, n_iter, c_min, c_max, eps_min, eps_max, gamma_min, gamma_max,
-                       w=0.7, c1=1.5, c2=1.5):
-    """Fast PSO training with ANOVA RBF kernel - online progress - sesuai Colab (w=0.7)"""
-    # Initialize
+
+def pso_training_direct_anova(X_train, y_train, X_test, y_test, scaler_y,
+                              n_particles, n_iter,
+                              c_min, c_max, eps_min, eps_max, gamma_min, gamma_max,
+                              w=0.7, c1=1.5, c2=1.5):
+    """PSO holdout dengan kernel ANOVA RBF"""
     np.random.seed(42)
-    lb = np.array([c_min, eps_min, gamma_min])
-    ub = np.array([c_max, eps_max, gamma_max])
-    
+    lb = np.array([c_min, eps_min, gamma_min], dtype=float)
+    ub = np.array([c_max, eps_max, gamma_max], dtype=float)
+
     particles = np.random.uniform(lb, ub, (n_particles, 3))
     velocities = np.zeros((n_particles, 3))
     personal_best = particles.copy()
     personal_best_score = np.array([float('inf')] * n_particles)
-    
+
     global_best = None
     global_best_score = float('inf')
     global_best_pred = None
     global_best_model = None
-    mape_history = []
-    
-    # PSO Loop
+    rmse_history = []
+
+    X_train_a = np.asarray(X_train, dtype=np.float64)
+    y_train_a = np.asarray(y_train, dtype=np.float64)
+    X_test_a = np.asarray(X_test, dtype=np.float64)
+    y_test_a = np.asarray(y_test, dtype=np.float64)
+
     for iter_num in range(n_iter):
-        iter_info = {'iteration': iter_num + 1, 'total': n_iter, 'particles': []}
-        
+        iter_info = {'iteration': int(iter_num + 1), 'total': int(n_iter), 'particles': []}
+
         for j in range(n_particles):
-            C, eps, gamma = particles[j]
-            mape_score, y_pred, model = evaluate_svr_anova(
-                C, eps, gamma, X_train, y_train, X_test, y_test,
-                timeout=8, max_iter=10000
-            )
-            
-            if mape_score < personal_best_score[j]:
+            C = float(np.clip(particles[j][0], c_min, c_max))
+            eps = float(np.clip(particles[j][1], eps_min, eps_max))
+            gamma = float(np.clip(particles[j][2], gamma_min, gamma_max))
+
+            score, pred, model = evaluate_direct_anova([C, eps, gamma], X_train_a, y_train_a, X_test_a, y_test_a, scaler_y)
+
+            if score < personal_best_score[j]:
                 personal_best[j] = particles[j].copy()
-                personal_best_score[j] = mape_score
-                
-                if mape_score < global_best_score:
-                    global_best_score = mape_score
+                personal_best_score[j] = score
+                if score < global_best_score:
+                    global_best_score = score
                     global_best = particles[j].copy()
-                    global_best_pred = y_pred
+                    global_best_pred = pred
                     global_best_model = model
-            
+
             iter_info['particles'].append({
-                'idx': j + 1,
-                'mape': mape_score,
-                'C': C,
-                'eps': eps,
-                'gamma': gamma
+                'idx': int(j + 1),
+                'rmse': float(score),
+                'C': float(C),
+                'eps': float(eps),
+                'gamma': float(gamma)
             })
-        
-        mape_history.append(global_best_score)
-        iter_info['best_mape'] = global_best_score
-        iter_info['progress'] = (iter_num + 1) / n_iter
-        
-        # Always include best_params for safe access
+
+        rmse_history.append(float(global_best_score))
+        iter_info['best_rmse'] = float(global_best_score)
+        iter_info['progress'] = float((iter_num + 1) / n_iter)
+
         if global_best is not None:
             iter_info['best_params'] = {
                 'C': float(global_best[0]),
                 'epsilon': float(global_best[1]),
                 'gamma': float(global_best[2])
             }
-        
-        # Include final data on last iteration
+
         if iter_num == n_iter - 1:
             iter_info['predictions'] = global_best_pred
             iter_info['model'] = global_best_model
-            iter_info['mape_history'] = mape_history
-        
-        # Update velocity and position
-        r1, r2 = np.random.rand(), np.random.rand()
+            iter_info['rmse_history'] = rmse_history
+
+        r1, r2 = float(np.random.rand()), float(np.random.rand())
         gb = global_best if global_best is not None else personal_best[0]
         for j in range(n_particles):
             velocities[j] = (
@@ -156,5 +134,176 @@ def pso_training_anova(X_train, y_train, X_test, y_test,
             )
             particles[j] += velocities[j]
             particles[j] = np.clip(particles[j], lb, ub)
-        
+
         yield iter_info
+
+
+def evaluate_cv_anova(params, folds_data):
+    """Evaluasi ANOVA dengan CV: rata-rata RMSE"""
+    C, epsilon, gamma = params
+    rmse_scores = []
+    try:
+        for X_tr, y_tr_sc, X_val, y_val_sc, scaler_fold, y_val_asli in folds_data:
+            kernel_func = partial(hitung_anova_rbf, gamma=float(gamma))
+            model = SVR(kernel=kernel_func, C=float(C), epsilon=float(epsilon), max_iter=10000)
+            model.fit(X_tr, y_tr_sc)
+            y_pred_sc = model.predict(X_val)
+            y_pred_asli = scaler_fold.inverse_transform(y_pred_sc.reshape(-1, 1)).ravel()
+            y_pred_asli = np.clip(y_pred_asli, 0, None)
+            rmse = float(np.sqrt(mean_squared_error(y_val_asli, y_pred_asli)))
+            rmse_scores.append(rmse)
+        return float(np.mean(rmse_scores))
+    except Exception:
+        return float('inf')
+
+
+def pso_training_cv_anova(X_train, y_train_scaled, scaler_y,
+                          n_particles, n_iter,
+                          c_min, c_max, eps_min, eps_max, gamma_min, gamma_max,
+                          w=0.7, c1=1.5, c2=1.5, n_folds=5):
+    """PSO dengan K-Fold CV untuk kernel ANOVA RBF"""
+    np.random.seed(42)
+    lb = np.array([c_min, eps_min, gamma_min], dtype=float)
+    ub = np.array([c_max, eps_max, gamma_max], dtype=float)
+
+    particles = np.random.uniform(lb, ub, (n_particles, 3))
+    velocities = np.zeros((n_particles, 3))
+    personal_best = particles.copy()
+    personal_best_score = np.array([float('inf')] * n_particles)
+
+    global_best = None
+    global_best_score = float('inf')
+    rmse_history = []
+
+    X_train_a = np.asarray(X_train, dtype=np.float64)
+    y_train_scaled_a = np.asarray(y_train_scaled, dtype=np.float64)
+
+    kf = KFold(n_splits=n_folds, shuffle=False)
+    folds_data = []
+    y_train_asli = scaler_y.inverse_transform(y_train_scaled_a.reshape(-1, 1)).ravel()
+
+    for train_idx, val_idx in kf.split(X_train_a):
+        folds_data.append((
+            X_train_a[train_idx],
+            y_train_scaled_a[train_idx],
+            X_train_a[val_idx],
+            y_train_scaled_a[val_idx],
+            scaler_y,
+            y_train_asli[val_idx]
+        ))
+
+    for iter_num in range(n_iter):
+        iter_info = {'iteration': int(iter_num + 1), 'total': int(n_iter), 'particles': []}
+
+        for j in range(n_particles):
+            C = float(np.clip(particles[j][0], c_min, c_max))
+            eps = float(np.clip(particles[j][1], eps_min, eps_max))
+            gamma = float(np.clip(particles[j][2], gamma_min, gamma_max))
+
+            score = evaluate_cv_anova([C, eps, gamma], folds_data)
+
+            if score < personal_best_score[j]:
+                personal_best[j] = particles[j].copy()
+                personal_best_score[j] = score
+                if score < global_best_score:
+                    global_best_score = score
+                    global_best = particles[j].copy()
+
+            iter_info['particles'].append({
+                'idx': int(j + 1),
+                'rmse': float(score),
+                'C': float(C),
+                'eps': float(eps),
+                'gamma': float(gamma)
+            })
+
+        rmse_history.append(float(global_best_score))
+        iter_info['best_rmse'] = float(global_best_score)
+        iter_info['progress'] = float((iter_num + 1) / n_iter)
+
+        if global_best is not None:
+            iter_info['best_params'] = {
+                'C': float(global_best[0]),
+                'epsilon': float(global_best[1]),
+                'gamma': float(global_best[2])
+            }
+
+        if iter_num == n_iter - 1:
+            iter_info['rmse_history'] = rmse_history
+
+        r1, r2 = float(np.random.rand()), float(np.random.rand())
+        gb = global_best if global_best is not None else personal_best[0]
+        for j in range(n_particles):
+            velocities[j] = (
+                w * velocities[j] +
+                c1 * r1 * (personal_best[j] - particles[j]) +
+                c2 * r2 * (gb - particles[j])
+            )
+            particles[j] += velocities[j]
+            particles[j] = np.clip(particles[j], lb, ub)
+
+        yield iter_info
+
+
+def validate_cv_anova(best_params, X_train, y_train_scaled, scaler_y, n_folds=10):
+    """Validasi parameter terbaik dengan K-Fold CV untuk ANOVA RBF"""
+    C = float(best_params['C'])
+    epsilon = float(best_params['epsilon'])
+    gamma = float(best_params['gamma'])
+
+    kf = KFold(n_splits=n_folds, shuffle=False)
+    fold_results = []
+    X_train_a = np.asarray(X_train, dtype=np.float64)
+    y_train_scaled_a = np.asarray(y_train_scaled, dtype=np.float64)
+    y_train_asli = scaler_y.inverse_transform(y_train_scaled_a.reshape(-1, 1)).ravel()
+
+    for fold_idx, (train_idx, val_idx) in enumerate(kf.split(X_train_a)):
+        try:
+            kernel_func = partial(hitung_anova_rbf, gamma=gamma)
+            model = SVR(kernel=kernel_func, C=C, epsilon=epsilon, max_iter=10000)
+            model.fit(X_train_a[train_idx], y_train_scaled_a[train_idx])
+            y_pred_sc = model.predict(X_train_a[val_idx])
+            y_pred_asli = scaler_y.inverse_transform(y_pred_sc.reshape(-1, 1)).ravel()
+            y_pred_asli = np.clip(y_pred_asli, 0, None)
+            rmse = float(np.sqrt(mean_squared_error(y_train_asli[val_idx], y_pred_asli)))
+        except Exception:
+            rmse = float('inf')
+
+        fold_results.append({
+            'fold': int(fold_idx + 1),
+            'rmse': rmse,
+            'n_train': int(len(train_idx)),
+            'n_val': int(len(val_idx))
+        })
+
+    valid_rmse = [r['rmse'] for r in fold_results if r['rmse'] != float('inf')]
+    avg_rmse = float(np.mean(valid_rmse)) if valid_rmse else float('inf')
+    return fold_results, avg_rmse
+
+
+def train_final_model_anova(best_params, X_train, y_train_scaled, scaler_y, X_test, y_test_scaled):
+    """Train final ANOVA model di 100% training, predict test set"""
+    C = float(best_params['C'])
+    epsilon = float(best_params['epsilon'])
+    gamma = float(best_params['gamma'])
+
+    X_train_a = np.asarray(X_train, dtype=np.float64)
+    y_train_a = np.asarray(y_train_scaled, dtype=np.float64)
+    X_test_a = np.asarray(X_test, dtype=np.float64)
+    y_test_a = np.asarray(y_test_scaled, dtype=np.float64)
+
+    kernel_func = partial(hitung_anova_rbf, gamma=gamma)
+    model = SVR(kernel=kernel_func, C=C, epsilon=epsilon, max_iter=10000)
+    model.fit(X_train_a, y_train_a)
+
+    y_pred_sc = model.predict(X_test_a)
+    y_pred_asli = scaler_y.inverse_transform(y_pred_sc.reshape(-1, 1)).ravel()
+    y_pred_asli = np.clip(y_pred_asli, 0, None)
+    y_test_asli = scaler_y.inverse_transform(y_test_a.reshape(-1, 1)).ravel()
+
+    rmse = float(np.sqrt(mean_squared_error(y_test_asli, y_pred_asli)))
+    ss_res = np.sum((y_test_asli - y_pred_asli) ** 2)
+    ss_tot = np.sum((y_test_asli - np.mean(y_test_asli)) ** 2)
+    r2 = float(1 - ss_res / ss_tot) if ss_tot != 0 else 0.0
+
+    return model, y_pred_asli, y_test_asli, rmse, r2
