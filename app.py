@@ -232,9 +232,17 @@ def inverse_scale_production(production_scaled):
     production_real = production_scaled * (max_prod - min_prod) + min_prod
     return production_real
 
-def load_pretrained_model():
-    """Load model SVR yang sudah dilatih"""
-    model_path = "model_final_padi.save"
+def load_pretrained_model(model_filename="model_final_padi.save"):
+    """Load model SVR yang sudah dilatih
+    
+    Args:
+        model_filename (str): Nama file model yang akan di-load.
+        Default: 'model_final_padi.save'
+    
+    Returns:
+        Model SVR atau None jika file tidak ditemukan/error
+    """
+    model_path = model_filename
     if os.path.exists(model_path):
         try:
             return joblib.load(model_path)
@@ -384,8 +392,12 @@ def input_data_page():
     page_info_box("""
 **Tentang Menu Ini**
 
-Menu ini memprediksi **produksi padi (ton)** dan **produktivitas (ku/ha)** tanpa melatih ulang model —
-langsung memakai model tersimpan `model_final_padi.save` (SVR-ANOVA-RBF).
+Sistem menyediakan dua varian. SVR - ANOVA RBF (Model Terbaik) menghitung kemiripan pada tiap dimensi fitur 
+secara terpisah sehingga lebih sensitif terhadap pola kompleks. SVR - Standar RBF menghitung kemiripan fitur secara global, 
+disediakan sebagai model pembanding.
+
+Menu ini memprediksi **produksi padi (ton)** dan **produktivitas (ton/ha)** tanpa melatih ulang model —
+langsung memakai model tersimpan.
 
 **Fitur:**
 - **Prediksi Cepat** — input satu baris, hasil instan.
@@ -408,10 +420,28 @@ Parameter C, γ, ε *tidak* diatur di sini — sudah tertanam dalam model terlat
     with tab1:
         st.markdown("### 🔮 Prediksi Produksi Padi dengan Model SVR")
         
+        # --- TAMBAHAN KODE: Pilihan Model ---
+        st.markdown("#### 🤖 Pilih Arsitektur Model")
+        pilihan_model_tab1 = st.radio(
+            "Pilih model SVR yang akan digunakan:",
+            options=[
+                "SVR - ANOVA RBF (Model Terbaik)",
+                "SVR - Standar RBF"
+            ],
+            horizontal=True,
+            key="radio_model_tab1"
+        )
+        
+        # Tentukan file model berdasarkan pilihan user
+        if pilihan_model_tab1 == "SVR - ANOVA RBF (Model Terbaik)":
+            file_model_aktif = "model_final_padi.save"
+        else:  # "SVR - Standar RBF"
+            file_model_aktif = "model_svr_rbf.save"
+        
         # Load model
-        model = load_pretrained_model()
+        model = load_pretrained_model(file_model_aktif)
         if model is None:
-            st.error("❌ Model tidak ditemukan: model_final_padi.save")
+            st.error(f"❌ Model tidak ditemukan: {file_model_aktif}")
             st.stop()
         
         with st.form("prediction_form", border=True):
@@ -492,13 +522,13 @@ Parameter C, γ, ε *tidak* diatur di sini — sudah tertanam dalam model terlat
                         """, unsafe_allow_html=True)
                     
                     with col2:
-                        produktivitas = produksi_prediksi / luas_panen * 100 if luas_panen > 0 else 0
+                        produktivitas = produksi_prediksi / luas_panen if luas_panen > 0 else 0
                         st.markdown(f"""
                         <div style="padding: 20px; background: linear-gradient(135deg, #fbc02d, #f9a825); 
                                     border-radius: 10px; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.15);">
                         <div style="margin: 0; font-size: 1.2rem; font-weight: 700; color: #000000 !important; text-shadow: 1px 1px 2px rgba(255,255,255,0.3);">📊 Produktivitas</div>
-                        <p style="margin: 15px 0 0 0; font-size: 2.8rem; font-weight: 900; color: #000000 !important; text-shadow: 1px 1px 2px rgba(255,255,255,0.3);">{id_format(produktivitas, 1)}</p>
-                        <p style="margin: 5px 0 0 0; font-size: 1rem; font-weight: 600; color: #000000 !important;">ku/ha</p>
+                        <p style="margin: 15px 0 0 0; font-size: 2.8rem; font-weight: 900; color: #000000 !important; text-shadow: 1px 1px 2px rgba(255,255,255,0.3);">{id_format(produktivitas, 2)}</p>
+                        <p style="margin: 5px 0 0 0; font-size: 1rem; font-weight: 600; color: #000000 !important;">ton/ha</p>
                         </div>
                         """, unsafe_allow_html=True)
                     
@@ -560,10 +590,28 @@ Parameter C, γ, ε *tidak* diatur di sini — sudah tertanam dalam model terlat
         4️⃣ Hasil prediksi akan ditampilkan di tabel baru dengan statistik lengkap
         """)
         
-        # Load model SVR terbaik
-        model_svr = load_pretrained_model()
+        # --- TAMBAHAN KODE: Pilihan Model ---
+        st.markdown("#### 🤖 Pilih Arsitektur Model")
+        pilihan_model_tab2 = st.radio(
+            "Pilih model SVR yang akan digunakan:",
+            options=[
+                "SVR - ANOVA RBF (Model Terbaik)",
+                "SVR - Standar RBF"
+            ],
+            horizontal=True,
+            key="radio_model_tab2"
+        )
+        
+        # Tentukan file model berdasarkan pilihan user
+        if pilihan_model_tab2 == "SVR - ANOVA RBF (Model Terbaik)":
+            file_model_batch = "model_final_padi.save"
+        else:  # "SVR - Standar RBF"
+            file_model_batch = "model_svr_rbf.save"
+        
+        # Load model SVR sesuai pilihan user
+        model_svr = load_pretrained_model(file_model_batch)
         if model_svr is None:
-            st.error("❌ Model SVR tidak ditemukan: model_final_padi.save")
+            st.error(f"❌ Model SVR tidak ditemukan: {file_model_batch}")
             st.info("📌 Silakan pastikan file model ada di direktori utama.")
         else:
             # ===== STEP 1: FORM INPUT DATA =====

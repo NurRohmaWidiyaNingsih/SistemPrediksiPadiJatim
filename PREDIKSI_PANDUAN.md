@@ -31,7 +31,7 @@ Setelah klik **[🔮 Prediksi Produksi Padi]**, sistem akan menampilkan:
 
 1. **Hasil Utama** (3 Metric Cards):
    - Produksi Prediksi (ton)
-   - Produktivitas (ku/ha)
+   - Produktivitas (ton/ha)
    - Luas Panen (ha)
 
 2. **Detail Prediksi**:
