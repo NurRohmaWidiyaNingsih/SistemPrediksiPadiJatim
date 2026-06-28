@@ -425,9 +425,9 @@ Parameter C, γ, ε *tidak* diatur di sini — sudah tertanam dalam model terlat
         pilihan_model_tab1 = st.radio(
             "Pilih model SVR yang akan digunakan:",
             options=[
-                "SVR - ANOVA RBF (Split Data)",
-                "SVR - Standar RBF (Split Data)",
-                "SVR - 10-Fold CV ANOVA RBF (Model Terbaik)"
+                "SVR - ANOVA RBF (Model Terbaik)",
+                "SVR - Standar RBF",
+                "SVR - 10-Fold CV ANOVA RBF"
             ],
             horizontal=True,
             key="radio_model_tab1"
