@@ -418,7 +418,24 @@ Parameter C, γ, ε *tidak* diatur di sini — sudah tertanam dalam model terlat
     
     # Tab 1: Prediksi Manual Cepat dengan Model
     with tab1:
-        st.markdown("### 🔮 Prediksi Produksi Padi dengan Model SVR")
+        st.markdown(
+            """
+            <style>
+            /* Specific override for this heading to ensure visibility */
+            h3.custom-black {
+                color: #000000 !important;
+                -webkit-text-fill-color: #000000 !important;
+                opacity: 1 !important;
+                background: none !important;
+                -webkit-background-clip: initial !important;
+                mix-blend-mode: normal !important;
+                text-shadow: none !important;
+            }
+            </style>
+            <h3 class="custom-black">🔮 Prediksi Produksi Padi dengan Model SVR</h3>
+            """,
+            unsafe_allow_html=True,
+        )
         
         # --- TAMBAHAN KODE: Pilihan Model ---
         st.markdown("#### 🤖 Pilih Arsitektur Model")
