@@ -392,9 +392,9 @@ def input_data_page():
     page_info_box("""
 **Tentang Menu Ini**
 
-Sistem menyediakan dua varian. SVR - ANOVA RBF (Model Terbaik) menghitung kemiripan pada tiap dimensi fitur 
+Sistem menyediakan 3 varian. SVR - ANOVA RBF (Model Terbaik) menghitung kemiripan pada tiap dimensi fitur 
 secara terpisah sehingga lebih sensitif terhadap pola kompleks. SVR - Standar RBF menghitung kemiripan fitur secara global, 
-disediakan sebagai model pembanding.
+disediakan sebagai model pembanding. 10-Fold CV ANOVA RBF adalah model hasil validasi terbaik dari 10-Fold Cross-Validation.
 
 Menu ini memprediksi **produksi padi (ton)** dan **produktivitas (ton/ha)** tanpa melatih ulang model —
 langsung memakai model tersimpan.
@@ -425,19 +425,25 @@ Parameter C, γ, ε *tidak* diatur di sini — sudah tertanam dalam model terlat
         pilihan_model_tab1 = st.radio(
             "Pilih model SVR yang akan digunakan:",
             options=[
-                "SVR - ANOVA RBF (Model Terbaik)",
-                "SVR - Standar RBF"
+                "SVR - ANOVA RBF (Split Data)",
+                "SVR - Standar RBF (Split Data)",
+                "SVR - 10-Fold CV ANOVA RBF (Model Terbaik)"
             ],
             horizontal=True,
             key="radio_model_tab1"
         )
-        
-        # Tentukan file model berdasarkan pilihan user
-        if pilihan_model_tab1 == "SVR - ANOVA RBF (Model Terbaik)":
+
+        # Tentukan file model berdasarkan pilihan user dan tampilkan keterangan
+        if pilihan_model_tab1 == "SVR - ANOVA RBF (Split Data)":
             file_model_aktif = "model_final_padi.save"
-        else:  # "SVR - Standar RBF"
+            st.info("💡 **Keterangan Model:** Model ini dilatih menggunakan kernel ANOVA RBF dengan pembagian dataset Rasio 90:10. Parameter optimal PSO yang didapat: Partikel = 30, Iterasi = 100. Parameter SVR: C = 1,000, Epsilon = 0,003367, Gamma = 282,487.")
+        elif pilihan_model_tab1 == "SVR - Standar RBF (Split Data)":
             file_model_aktif = "model_svr_rbf.save"
-        
+            st.info("💡 **Keterangan Model:** Model ini dilatih menggunakan kernel standar RBF dengan pembagian dataset Rasio 90:10. Parameter optimal PSO yang didapat: Partikel = 100, Iterasi = 100. Parameter SVR: C = 242,449, Epsilon = 0,001518, Gamma = 0,0232.")
+        else:  # "SVR - 10-Fold CV ANOVA RBF (Model Terbaik)"
+            file_model_aktif = "model_svr_cv.save"
+            st.info("💡 **Keterangan Model:** Model ini divalidasi menggunakan 10-Fold Cross-Validation dengan kernel ANOVA RBF pada rasio data dasar 90:10. Model ini merupakan hasil evaluasi terbaik yang berada di **Fold 4**. Parameter optimal PSO: Partikel = 30, Iterasi = 50. Parameter SVR: C = 50,157, Epsilon = 0,000001, Gamma = 166,850.")
+
         # Load model
         model = load_pretrained_model(file_model_aktif)
         if model is None:
@@ -595,19 +601,25 @@ Parameter C, γ, ε *tidak* diatur di sini — sudah tertanam dalam model terlat
         pilihan_model_tab2 = st.radio(
             "Pilih model SVR yang akan digunakan:",
             options=[
-                "SVR - ANOVA RBF (Model Terbaik)",
-                "SVR - Standar RBF"
+                "SVR - ANOVA RBF (Split Data)",
+                "SVR - Standar RBF (Split Data)",
+                "SVR - 10-Fold CV ANOVA RBF (Model Terbaik)"
             ],
             horizontal=True,
             key="radio_model_tab2"
         )
-        
-        # Tentukan file model berdasarkan pilihan user
-        if pilihan_model_tab2 == "SVR - ANOVA RBF (Model Terbaik)":
+
+        # Tentukan file model berdasarkan pilihan user dan tampilkan keterangan
+        if pilihan_model_tab2 == "SVR - ANOVA RBF (Split Data)":
             file_model_batch = "model_final_padi.save"
-        else:  # "SVR - Standar RBF"
+            st.info("💡 **Keterangan Model:** Model ini dilatih menggunakan kernel ANOVA RBF dengan pembagian dataset Rasio 90:10. Parameter optimal PSO yang didapat: Partikel = 30, Iterasi = 100. Parameter SVR: C = 10.000, Epsilon = 0,003367, Gamma = 282,487.")
+        elif pilihan_model_tab2 == "SVR - Standar RBF (Split Data)":
             file_model_batch = "model_svr_rbf.save"
-        
+            st.info("💡 **Keterangan Model:** Model ini dilatih menggunakan kernel standar RBF dengan pembagian dataset Rasio 90:10. Parameter optimal PSO yang didapat: Partikel = 100, Iterasi = 100. Parameter SVR: C = 242,449, Epsilon = 0,001518, Gamma = 0,0232.")
+        else:  # "SVR - 10-Fold CV ANOVA RBF (Model Terbaik)"
+            file_model_batch = "model_svr_cv.save"
+            st.info("💡 **Keterangan Model:** Model ini divalidasi menggunakan 10-Fold Cross-Validation dengan kernel ANOVA RBF pada rasio data dasar 90:10. Model ini merupakan hasil evaluasi terbaik yang berada di **Fold 4**. Parameter optimal PSO: Partikel = 30, Iterasi = 50. Parameter SVR: C = 50,157, Epsilon = 0,000001, Gamma = 166,850.")
+
         # Load model SVR sesuai pilihan user
         model_svr = load_pretrained_model(file_model_batch)
         if model_svr is None:
